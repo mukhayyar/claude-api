@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Run Claude Code against a non-subscription API model (MiMo, etc.) in tmux,
+# fully isolated from your default ~/.claude subscription setup.
+#
+#   claude-api            -> lists profiles
+#   claude-api mimo       -> attach/create tmux session for the 'mimo' profile
+#   claude-api mimo -- -p  -> args after `--` are passed straight to `claude`
+#
+# Add a model: drop ~/.claude-api/profiles/<name>.env (copy mimo.env).
+set -euo pipefail
+
+ROOT="$HOME/.claude-api"
+PROFILE="${1:-}"
+
+if [[ -z "$PROFILE" ]]; then
+  echo "profiles:"; ls "$ROOT/profiles"/*.env 2>/dev/null | sed 's#.*/##;s#\.env$#  #' || echo "  (none)"
+  echo "usage: claude-api <profile> [-- <claude args>]"; exit 0
+fi
+
+ENV_FILE="$ROOT/profiles/$PROFILE.env"
+[[ -f "$ENV_FILE" ]] || { echo "no such profile: $PROFILE ($ENV_FILE)"; exit 1; }
+
+shift || true
+[[ "${1:-}" == "--" ]] && shift || true   # drop the -- separator if present
+
+# Isolated config dir => separate settings/history/auth, subscription untouched.
+CFG="$ROOT/configs/$PROFILE"
+mkdir -p "$CFG"
+[[ -f "$CFG/.claude.json" ]] || echo '{"hasCompletedOnboarding":true}' > "$CFG/.claude.json"
+
+SESSION="capi-$PROFILE"
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  # set -a exports everything sourced from the profile file
+  tmux new-session -d -s "$SESSION" -e CLAUDE_CONFIG_DIR="$CFG" \
+    "set -a; . '$ENV_FILE'; set +a; exec claude $*"
+fi
+exec tmux attach -t "$SESSION"
