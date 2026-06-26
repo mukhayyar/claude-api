@@ -71,6 +71,12 @@ shift || true
 CFG="$ROOT/configs/$PROFILE"
 mkdir -p "$CFG"
 [[ -f "$CFG/.claude.json" ]] || echo '{"hasCompletedOnboarding":true}' > "$CFG/.claude.json"
+[[ -f "$CFG/settings.json" ]] || cat > "$CFG/settings.json" <<'JSON'
+{
+  "includeCoAuthoredBy": false,
+  "attribution": { "commit": "empty", "pr": "empty" }
+}
+JSON
 
 SESSION="capi-$PROFILE"
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
