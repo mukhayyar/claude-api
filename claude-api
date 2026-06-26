@@ -78,10 +78,14 @@ mkdir -p "$CFG"
 }
 JSON
 
+# Isolated throwaway config => skip permission prompts by default.
+# Set CLAUDE_API_SAFE=1 to keep the normal permission flow.
+SKIP="--dangerously-skip-permissions"; [[ "${CLAUDE_API_SAFE:-}" == 1 ]] && SKIP=""
+
 SESSION="capi-$PROFILE"
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   # set -a exports everything sourced from the profile file
   tmux new-session -d -s "$SESSION" -e CLAUDE_CONFIG_DIR="$CFG" \
-    "set -a; . '$ENV_FILE'; set +a; exec claude $*"
+    "set -a; . '$ENV_FILE'; set +a; exec claude $SKIP $*"
 fi
 exec tmux attach -t "$SESSION"
