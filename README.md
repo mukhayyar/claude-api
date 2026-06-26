@@ -14,7 +14,10 @@ git clone git@github.com:mukhayyar/claude-api.git ~/.claude-api
 ln -sf ~/.claude-api/claude-api ~/.local/bin/claude-api   # ~/.local/bin must be on PATH
 ```
 
-Requires `claude` and `tmux` on PATH.
+Prereqs `claude` and `tmux` are **auto-installed if missing** — the launcher detects
+your package manager (brew / apt / dnf / yum / pacman / zypper / apk / pkg) and prompts
+before installing. Set `CLAUDE_API_ASSUME_YES=1` to skip the prompt, or run
+`claude-api doctor` to just check. Native Windows isn't supported (no tmux) — use WSL.
 
 ## Use
 
