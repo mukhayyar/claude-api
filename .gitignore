@@ -1,3 +1,4 @@
 # Real profiles hold API keys — never commit. Only *.env.example is tracked.
 profiles/*.env
 configs/
+proxy/*.log

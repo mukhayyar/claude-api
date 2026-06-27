@@ -13,6 +13,7 @@
 set -euo pipefail
 
 ROOT="$HOME/.claude-api"
+MAIN_SETTINGS="$HOME/.claude/settings.json"
 
 # --- prereq scan + cross-distro install ------------------------------------
 pm_install() { # $* = packages; picks whatever package manager exists
@@ -50,6 +51,60 @@ ensure_deps() {
   command -v claude tmux >/dev/null || { echo "Prereqs still missing after install." >&2; exit 1; }
 }
 
+plugin_dirs() {
+  # Pass the latest installed version of each plugin from the global cache so
+  # claude-mem (and other enabled plugins) keep working in isolated profiles.
+  local dir latest
+  for dir in "$HOME/.claude/plugins/cache"/*/*; do
+    [[ -d "$dir" ]] || continue
+    latest=$(ls -d "$dir"/* 2>/dev/null | sort -V | tail -1)
+    [[ -d "$latest" ]] || continue
+    printf '%s' " --plugin-dir $(printf '%q' "$latest")"
+  done
+}
+
+proxy_running() {
+  local port="${1:-}"
+  [[ -z "$port" ]] && return 1
+  # /dev/tcp works in bash; nc is a fallback.
+  if command -v nc >/dev/null; then
+    nc -z localhost "$port" 2>/dev/null
+  else
+    (exec 3<>/dev/tcp/localhost/"$port") 2>/dev/null
+  fi
+}
+
+start_proxy() {
+  local port="${LLAMA_PROXY_PORT:-}"
+  [[ -z "$port" ]] && return 0
+  proxy_running "$port" && return 0
+
+  echo "starting llama proxy on port $port ..." >&2
+  nohup node "$ROOT/proxy/proxy.js" \
+    >> "$ROOT/proxy/$PROFILE.log" 2>&1 &
+  local pid=$!
+
+  # Wait up to 5s for the proxy to accept connections.
+  for _ in $(seq 1 50); do
+    sleep 0.1
+    proxy_running "$port" && return 0
+  done
+
+  echo "proxy failed to start (pid $pid). logs:" >&2
+  tail -n 20 "$ROOT/proxy/$PROFILE.log" 2>/dev/null || true
+  return 1
+}
+
+session_name() {
+  # Include a hash of the full working directory so each folder gets its own
+  # claude-api tmux session for the same profile.
+  local base
+  base=$(basename "$PWD")
+  local hash
+  hash=$(printf '%s' "$PWD" | cksum | awk '{print $1}')
+  printf 'capi-%s-%s-%s' "$PROFILE" "$base" "$hash"
+}
+
 PROFILE="${1:-}"
 
 if [[ "$PROFILE" == "doctor" ]]; then ensure_deps; echo "ok: claude + tmux present."; exit 0; fi
@@ -71,21 +126,41 @@ shift || true
 CFG="$ROOT/configs/$PROFILE"
 mkdir -p "$CFG"
 [[ -f "$CFG/.claude.json" ]] || echo '{"hasCompletedOnboarding":true}' > "$CFG/.claude.json"
-[[ -f "$CFG/settings.json" ]] || cat > "$CFG/settings.json" <<'JSON'
+
+# Seed settings from the main Claude config so plugins (claude-mem, etc.) keep working.
+if [[ ! -f "$CFG/settings.json" ]]; then
+  if [[ -f "$MAIN_SETTINGS" ]]; then
+    cp "$MAIN_SETTINGS" "$CFG/settings.json"
+  else
+    cat > "$CFG/settings.json" <<'JSON'
 {
   "includeCoAuthoredBy": false,
   "attribution": { "commit": "empty", "pr": "empty" }
 }
 JSON
+  fi
+fi
+
+# Load profile env so we can start the proxy with the right variables.
+set -a
+# shellcheck source=/dev/null
+. "$ENV_FILE"
+set +a
+
+# Auto-start the local llama proxy if this profile defines one.
+start_proxy
 
 # Isolated throwaway config => skip permission prompts by default.
 # Set CLAUDE_API_SAFE=1 to keep the normal permission flow.
 SKIP="--dangerously-skip-permissions"; [[ "${CLAUDE_API_SAFE:-}" == 1 ]] && SKIP=""
 
-SESSION="capi-$PROFILE"
+PLUGIN_FLAGS=$(plugin_dirs)
+SESSION=$(session_name)
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   # set -a exports everything sourced from the profile file
-  tmux new-session -d -s "$SESSION" -e CLAUDE_CONFIG_DIR="$CFG" \
-    "set -a; . '$ENV_FILE'; set +a; exec claude $SKIP $*"
+  # -c "$PWD" keeps the session in the folder where claude-api was invoked.
+  # shellcheck disable=SC2086
+  tmux new-session -d -s "$SESSION" -c "$PWD" -e CLAUDE_CONFIG_DIR="$CFG" \
+    "set -a; . '$ENV_FILE'; set +a; exec claude $SKIP $PLUGIN_FLAGS $*"
 fi
 exec tmux attach -t "$SESSION"
