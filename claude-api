@@ -2,9 +2,10 @@
 # Run Claude Code against a non-subscription API model (MiMo, etc.) in tmux,
 # fully isolated from your default ~/.claude subscription setup.
 #
-#   claude-api            -> lists profiles
-#   claude-api mimo       -> attach/create tmux session for the 'mimo' profile
-#   claude-api mimo -- -p  -> args after `--` are passed straight to `claude`
+#   claude-api                 -> lists profiles
+#   claude-api mimo            -> attach/create tmux session for the 'mimo' profile
+#   claude-api mimo --main     -> use ~/.claude config (resume default session with -r)
+#   claude-api mimo -- -p      -> args after `--` are passed straight to `claude`
 #
 # Add a model: drop ~/.claude-api/profiles/<name>.env (copy an .example).
 #
@@ -98,11 +99,13 @@ start_proxy() {
 session_name() {
   # Include a hash of the full working directory so each folder gets its own
   # claude-api tmux session for the same profile.
+  local suffix=""
+  [[ "${USE_MAIN:-0}" == 1 ]] && suffix="-main"
   local base
   base=$(basename "$PWD")
   local hash
   hash=$(printf '%s' "$PWD" | cksum | awk '{print $1}')
-  printf 'capi-%s-%s-%s' "$PROFILE" "$base" "$hash"
+  printf 'capi-%s%s-%s-%s' "$PROFILE" "$suffix" "$base" "$hash"
 }
 
 PROFILE="${1:-}"
@@ -111,7 +114,7 @@ if [[ "$PROFILE" == "doctor" ]]; then ensure_deps; echo "ok: claude + tmux prese
 
 if [[ -z "$PROFILE" ]]; then
   echo "profiles:"; ls "$ROOT/profiles"/*.env 2>/dev/null | sed 's#.*/##;s#\.env$#  #' || echo "  (none)"
-  echo "usage: claude-api <profile> [-- <claude args>]"; exit 0
+  echo "usage: claude-api <profile> [--main] [-- <claude args>]"; exit 0
 fi
 
 ENV_FILE="$ROOT/profiles/$PROFILE.env"
@@ -120,15 +123,29 @@ ENV_FILE="$ROOT/profiles/$PROFILE.env"
 ensure_deps
 
 shift || true
+
+# --main: use the default ~/.claude config dir so `-r` resumes the main session.
+USE_MAIN=0
+if [[ "${1:-}" == "--main" ]]; then
+  USE_MAIN=1
+  shift || true
+fi
+
 [[ "${1:-}" == "--" ]] && shift || true   # drop the -- separator if present
 
-# Isolated config dir => separate settings/history/auth, subscription untouched.
-CFG="$ROOT/configs/$PROFILE"
-mkdir -p "$CFG"
-[[ -f "$CFG/.claude.json" ]] || echo '{"hasCompletedOnboarding":true}' > "$CFG/.claude.json"
+if [[ "$USE_MAIN" == 1 ]]; then
+  # Use main Claude config; still apply the profile's API env vars.
+  CFG="$HOME/.claude"
+  mkdir -p "$CFG"
+else
+  # Isolated config dir => separate settings/history/auth, subscription untouched.
+  CFG="$ROOT/configs/$PROFILE"
+  mkdir -p "$CFG"
+  [[ -f "$CFG/.claude.json" ]] || echo '{"hasCompletedOnboarding":true}' > "$CFG/.claude.json"
+fi
 
-# Seed settings from the main Claude config so plugins (claude-mem, etc.) keep working.
-if [[ ! -f "$CFG/settings.json" ]]; then
+# Seed isolated settings from the main Claude config so plugins (claude-mem, etc.) keep working.
+if [[ "$USE_MAIN" != 1 && ! -f "$CFG/settings.json" ]]; then
   if [[ -f "$MAIN_SETTINGS" ]]; then
     cp "$MAIN_SETTINGS" "$CFG/settings.json"
   else
@@ -151,8 +168,12 @@ set +a
 start_proxy
 
 # Isolated throwaway config => skip permission prompts by default.
-# Set CLAUDE_API_SAFE=1 to keep the normal permission flow.
-SKIP="--dangerously-skip-permissions"; [[ "${CLAUDE_API_SAFE:-}" == 1 ]] && SKIP=""
+# --main uses the real ~/.claude config, so keep the normal permission flow.
+# Set CLAUDE_API_SAFE=1 to keep the normal permission flow everywhere.
+SKIP="--dangerously-skip-permissions"
+if [[ "${USE_MAIN:-0}" == 1 || "${CLAUDE_API_SAFE:-}" == 1 ]]; then
+  SKIP=""
+fi
 
 PLUGIN_FLAGS=$(plugin_dirs)
 SESSION=$(session_name)
