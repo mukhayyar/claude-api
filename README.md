@@ -2,24 +2,46 @@
 
 Run [Claude Code](https://claude.com/claude-code) against any Anthropic-compatible
 API model (DeepSeek, Moonshot Kimi, Xiaomi MiMo, local llama.cpp/Qwen, …) in an
-isolated tmux session — **without touching your default `claude` subscription setup.**
+isolated terminal-multiplexer session — **without touching your default `claude` subscription setup.**
+
+On macOS/Linux it uses `tmux`; on Windows it uses [psmux](https://github.com/psmux/psmux)
+(the native Windows tmux replacement with first-class Claude Code support).
 
 Each profile gets its own `CLAUDE_CODE_*`/`ANTHROPIC_*` env and its own config dir
 (`configs/<profile>/`), so history, auth, and settings never collide with `~/.claude`.
 
 ## Install
 
+### macOS / Linux
+
 ```sh
 git clone git@github.com:mukhayyar/claude-api.git ~/.claude-api
 ln -sf ~/.claude-api/claude-api ~/.local/bin/claude-api   # ~/.local/bin must be on PATH
 ```
 
-Prereqs `claude` and `tmux` are **auto-installed if missing** — the launcher detects
+### Windows (PowerShell 7+)
+
+```powershell
+git clone git@github.com:mukhayyar/claude-api.git $env:USERPROFILE\.claude-api
+# Add ~/.claude-api to your PATH, or create a function in your $PROFILE:
+function claude-api { & "$env:USERPROFILE\.claude-api\claude-api.ps1" @args }
+```
+
+Install psmux first:
+
+```powershell
+winget install psmux
+```
+
+Prereqs `claude` and `tmux`/`psmux` are **auto-installed if missing** — the bash launcher detects
 your package manager (brew / apt / dnf / yum / pacman / zypper / apk / pkg) and prompts
 before installing. Set `CLAUDE_API_ASSUME_YES=1` to skip the prompt, or run
-`claude-api doctor` to just check. Native Windows isn't supported (no tmux) — use WSL.
+`claude-api doctor` / `claude-api.ps1 doctor` to just check. The PowerShell script requires
+PowerShell 7+ and psmux; it does not auto-install psmux for you.
 
 ## Quick start
+
+### macOS / Linux
 
 ```sh
 claude-api                    # list profiles
@@ -29,8 +51,18 @@ claude-api kimi -- -p "hi"    # args after -- are passed straight to `claude`
 
 Detach tmux with `Ctrl-b d`; re-attach by re-running the same command.
 
+### Windows (PowerShell)
+
+```powershell
+claude-api.ps1                    # list profiles
+claude-api.ps1 deepseek           # launch a profile in a psmux session
+claude-api.ps1 kimi -- -p "hi"    # args after -- are passed straight to `claude`
+```
+
+Detach psmux with `Ctrl-b d`; re-attach by re-running the same command.
+
 Sessions are scoped by **profile + working directory**, so running `claude-api kimi`
-from two different folders gives you two separate tmux sessions.
+from two different folders gives you two separate tmux/psmux sessions.
 
 ## Available profiles
 
@@ -88,6 +120,12 @@ config (and therefore `-r` resumes your main subscription sessions), add `--main
 claude-api kimi --main -- -r
 ```
 
+On Windows:
+
+```powershell
+claude-api.ps1 kimi --main -- -r
+```
+
 This applies the profile's API env variables while using `~/.claude` for settings,
 history, and auth. Permission prompts stay enabled in `--main` mode.
 
@@ -116,12 +154,24 @@ The `llama` profile runs a tiny local proxy (`proxy/proxy.js`) that translates
 Claude Code's Anthropic `/v1/messages` calls into OpenAI-compatible
 `/v1/chat/completions` calls for a local `llama-server`.
 
+**macOS / Linux**
+
 ```sh
 # 1. Start llama-server on an OpenAI-compatible endpoint, e.g. port 8081
 llama-server -m ~/.claude-api/models/Qwen3.5-4B-Q4_K_M.gguf --port 8081 -ngl 99
 
 # 2. In another terminal
 claude-api llama
+```
+
+**Windows (PowerShell)**
+
+```powershell
+# 1. Start llama-server
+llama-server -m $env:USERPROFILE\.claude-api\models\Qwen3.5-4B-Q4_K_M.gguf --port 8081 -ngl 99
+
+# 2. In another terminal
+claude-api.ps1 llama
 ```
 
 Configure the upstream in `profiles/llama.env`:
@@ -135,7 +185,9 @@ session. Logs go to `proxy/<profile>.log` (gitignored).
 
 ### Qwen3 / Qwen3.5 4B
 
-Both models support tool calling through the proxy. Example setup:
+Both models support tool calling through the proxy.
+
+**macOS / Linux**
 
 ```sh
 # Download a GGUF
@@ -152,8 +204,29 @@ llama-server -m ~/.claude-api/models/Qwen3-4B-Q4_K_M.gguf --port 8081 -ngl 99
 claude-api qwen3-4b
 ```
 
-On Apple Silicon, `-ngl 99` offloads layers to Metal. Use a separate `llama-server`
-port per model if you want to switch without restarting the server.
+**Windows (PowerShell)**
+
+```powershell
+# Download a GGUF
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude-api\models"
+hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir $env:USERPROFILE\.claude-api\models
+hf download unsloth/Qwen3.5-4B-GGUF Qwen3.5-4B-Q4_K_M.gguf --local-dir $env:USERPROFILE\.claude-api\models
+
+# Copy the provided local profiles
+Copy-Item "$env:USERPROFILE\.claude-api\profiles\qwen3-4b.env.example" "$env:USERPROFILE\.claude-api\profiles\qwen3-4b.env"
+Copy-Item "$env:USERPROFILE\.claude-api\profiles\qwen3.5-4b.env.example" "$env:USERPROFILE\.claude-api\profiles\qwen3.5-4b.env"
+
+# Start the server and launch
+llama-server -m "$env:USERPROFILE\.claude-api\models\Qwen3-4B-Q4_K_M.gguf" --port 8081 -ngl 99
+claude-api.ps1 qwen3-4b
+```
+
+On Apple Silicon, `-ngl 99` offloads layers to Metal. On Windows with NVIDIA/AMD you may
+need a CUDA/Vulkan build of llama.cpp; the proxy itself does not care which backend
+llama-server uses.
+
+Use a separate `llama-server` port per model if you want to switch without restarting
+the server.
 
 ## Environment variables
 
@@ -167,7 +240,8 @@ port per model if you want to switch without restarting the server.
 
 ```text
 ~/.claude-api/
-├── claude-api              # launcher script
+├── claude-api              # macOS / Linux launcher (bash)
+├── claude-api.ps1          # Windows launcher (PowerShell + psmux)
 ├── proxy/
 │   ├── proxy.js            # Anthropic → OpenAI proxy for local models
 │   └── *.log               # gitignored proxy logs
@@ -198,6 +272,21 @@ The launcher only looks at `*.env`, not `*.env.example`.
 
 **`-r` resumes the wrong session**: remember that isolated profiles have their own
 history. Use `--main` to resume your default `claude` sessions.
+
+**Windows: `claude-api.ps1` cannot be loaded because running scripts is disabled**:
+set the execution policy for the current user:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+**Windows: psmux not found**: the PowerShell script requires psmux (PowerShell 7+).
+Install it with `winget install psmux` and restart your terminal.
+
+**Windows: teammate agents spawn in-process instead of panes**: psmux only forces
+`--teammate-mode tmux` in interactive sessions. Pipe mode (`-p`) runs agents
+in-process by design. Also, Opus may choose worktree isolation, which is invisible
+to psmux — this is the same behavior as on macOS/Linux.
 
 ## License
 

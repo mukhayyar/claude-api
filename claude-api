@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run Claude Code against a non-subscription API model (MiMo, etc.) in tmux,
 # fully isolated from your default ~/.claude subscription setup.
+# For Windows, see claude-api.ps1 (PowerShell + psmux).
 #
 #   claude-api                 -> lists profiles
 #   claude-api mimo            -> attach/create tmux session for the 'mimo' profile
