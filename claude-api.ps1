@@ -6,6 +6,7 @@
 #   claude-api.ps1 mimo            -> attach/create psmux session for 'mimo'
 #   claude-api.ps1 mimo --main     -> use ~/.claude config (resume default session with -r)
 #   claude-api.ps1 mimo -- -p      -> args after -- are passed straight to claude
+#   claude-api.ps1 create-profile  -> interactively create a new profile
 #
 # Requires: PowerShell 7+, psmux (winget install psmux), claude, node (for local proxy).
 # Add a model: drop $env:USERPROFILE\.claude-api\profiles\<name>.env (copy an .example).
@@ -15,8 +16,71 @@ $ErrorActionPreference = "Stop"
 $ROOT = Join-Path $env:USERPROFILE ".claude-api"
 $MAIN_SETTINGS = Join-Path $env:USERPROFILE ".claude\settings.json"
 
+function Print-Banner {
+  Write-Host @"
+   _____ _                 _         _      _____ _   _ _____
+  /  __ \ |               | |       | |    |_   _| \ | |  __ \
+  | /  \/ | __ _ _ __ ___ | |    ___| |_     | | |  \| | |  \/
+  | |   | |/ _` | '_ ` _ \| |   / _ \ __|    | | | . ` | | __
+  | \__/\ | (_| | | | | | | |__|  __/ |_    _| |_| |\  | |_\ \
+   \____/_|\__,_|_| |_| |_|_____\___|\__|   \___/\_| \__/____/
+
+"@
+  Write-Host "  Claude Code, any API. Stay in Claude no matter which model you use."
+  Write-Host
+}
+
+function Print-Help {
+  Print-Banner
+  Write-Host @"
+USAGE
+  claude-api.ps1 <profile> [--main] [-- <claude args>]
+  claude-api.ps1 create-profile
+  claude-api.ps1 doctor
+  claude-api.ps1 --help | -h
+
+COMMANDS
+  <profile>        Launch a profile in an isolated psmux session.
+  create-profile   Interactively create a new `$env:USERPROFILE\.claude-api\profiles\*.env file.
+  doctor           Check that claude and psmux are installed.
+  --help, -h       Show this help message.
+
+FLAGS
+  --main           Use your default `$env:USERPROFILE\.claude config dir instead of an isolated
+                   one. This lets <profile> use the profile's API while letting
+                   <claude args> like -r resume your main subscription sessions.
+  --               Everything after -- is passed straight to claude.
+
+EXAMPLES
+  claude-api.ps1 deepseek
+  claude-api.ps1 kimi -- -p "hi"
+  claude-api.ps1 kimi --main -- -r
+  claude-api.ps1 create-profile
+
+ENVIRONMENT
+  `$env:CLAUDE_API_SAFE = "1"   Keep normal permission prompts in isolated profiles.
+
+PROFILES
+  Real profiles live in `$env:USERPROFILE\.claude-api\profiles\*.env and are gitignored.
+  Example templates are in `$env:USERPROFILE\.claude-api\profiles\*.env.example.
+"@
+}
+
 function Test-Command($cmd) {
   return [bool](Get-Command $cmd -ErrorAction SilentlyContinue)
+}
+
+function Prompt-Input($msg, $default = $null) {
+  if ($default) {
+    $in = Read-Host "$msg [$default]"
+    if ([string]::IsNullOrWhiteSpace($in)) { return $default }
+    return $in
+  }
+  return Read-Host "$msg"
+}
+
+function Prompt-Secret($msg) {
+  return Read-Host -AsSecureString "$msg" | ConvertFrom-SecureString -AsPlainText
 }
 
 function Ensure-Deps {
@@ -64,7 +128,7 @@ function Start-Proxy($port) {
   if (Test-ProxyRunning $port) { return }
 
   Write-Host "starting llama proxy on port $port ..." -ForegroundColor Cyan
-  $proxyLog = Join-Path $ROOT "proxy\$PROFILE.log"
+  $proxyLog = Join-Path $ROOT "proxy\$PROFILE_NAME.log"
   $proxyJs = Join-Path $ROOT "proxy\proxy.js"
   $null = Start-Process -FilePath "node" -ArgumentList "`"$proxyJs`"" `
     -RedirectStandardOutput $proxyLog -RedirectStandardError $proxyLog -WindowStyle Hidden
@@ -93,7 +157,6 @@ function Invoke-SourceEnv($path) {
     if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
       $name = $matches[1]
       $value = $matches[2]
-      # Strip surrounding quotes if present
       if (($value.StartsWith('"') -and $value.EndsWith('"')) -or
           ($value.StartsWith("'") -and $value.EndsWith("'"))) {
         $value = $value.Substring(1, $value.Length - 2)
@@ -103,7 +166,88 @@ function Invoke-SourceEnv($path) {
   }
 }
 
+function New-InteractiveProfile {
+  Print-Banner
+  Write-Host "Create a new claude-api profile"
+  Write-Host
+
+  $name = Prompt-Input "Profile name (e.g. deepseek, kimi, my-mimo)"
+  if ([string]::IsNullOrWhiteSpace($name)) {
+    Write-Host "Profile name is required." -ForegroundColor Red
+    exit 1
+  }
+
+  $profilePath = Join-Path $ROOT "profiles\$name.env"
+  if (Test-Path $profilePath) {
+    $overwrite = Read-Host "Profile '$name' already exists. Overwrite? [y/N]"
+    if ($overwrite -notmatch '^[Yy]$') {
+      Write-Host "Aborted."
+      exit 0
+    }
+  }
+
+  Write-Host
+  Write-Host "Choose a provider template:"
+  Write-Host "  1) DeepSeek"
+  Write-Host "  2) Moonshot Kimi"
+  Write-Host "  3) Xiaomi MiMo"
+  Write-Host "  4) Local llama.cpp (via proxy)"
+  Write-Host "  5) Custom"
+  $choice = Prompt-Input "Provider" "5"
+
+  switch ($choice) {
+    "1" { $baseUrl = "https://api.deepseek.com/anthropic"; $model = "deepseek-v4-pro[1m]" }
+    "2" { $baseUrl = "https://api.moonshot.ai/anthropic"; $model = "kimi-k2.7-code" }
+    "3" { $baseUrl = "https://api.example-mimo.com"; $model = "mimo-v2.5-pro[1m]" }
+    "4" { $baseUrl = "http://localhost:4000"; $model = "claude-sonnet-4-6" }
+    default {
+      $baseUrl = Prompt-Input "Anthropic-compatible base URL"
+      $model = Prompt-Input "Model name"
+    }
+  }
+
+  if ($choice -eq "4") {
+    $authToken = "no-key"
+  }
+  else {
+    $authToken = Prompt-Secret "API key"
+  }
+
+  New-Item -ItemType Directory -Force -Path (Join-Path $ROOT "profiles") | Out-Null
+  $content = @"
+# claude-api profile: $name
+ANTHROPIC_AUTH_TOKEN=$authToken
+ANTHROPIC_BASE_URL=$baseUrl
+ANTHROPIC_MODEL=$model
+ANTHROPIC_DEFAULT_SONNET_MODEL=$model
+ANTHROPIC_DEFAULT_OPUS_MODEL=$model
+ANTHROPIC_DEFAULT_HAIKU_MODEL=$model
+CLAUDE_CODE_SUBAGENT_MODEL=$model
+"@
+
+  if ($choice -eq "4") {
+    $content += @"
+
+# Proxy configuration
+LLAMA_PROXY_PORT=4000
+LLAMA_OPENAI_BASE_URL=http://localhost:8081/v1
+LLAMA_OPENAI_MODEL=Qwen3.5-0.8B-Q5_K_M
+LLAMA_OPENAI_API_KEY=no-key
+"@
+  }
+
+  $content | Set-Content $profilePath
+  Write-Host
+  Write-Host "Created profile: $profilePath"
+  Write-Host "Launch it with: claude-api.ps1 $name"
+}
+
 $PROFILE_NAME = $args[0]
+
+if ([string]::IsNullOrWhiteSpace($PROFILE_NAME) -or $PROFILE_NAME -eq "--help" -or $PROFILE_NAME -eq "-h") {
+  Print-Help
+  exit 0
+}
 
 if ($PROFILE_NAME -eq "doctor") {
   Ensure-Deps
@@ -111,16 +255,8 @@ if ($PROFILE_NAME -eq "doctor") {
   exit 0
 }
 
-if ([string]::IsNullOrWhiteSpace($PROFILE_NAME)) {
-  Write-Host "profiles:"
-  $profiles = Get-ChildItem -Path (Join-Path $ROOT "profiles") -Filter "*.env" -ErrorAction SilentlyContinue
-  if ($profiles) {
-    $profiles | ForEach-Object { Write-Host "  $($_.BaseName)" }
-  }
-  else {
-    Write-Host "  (none)"
-  }
-  Write-Host "usage: claude-api.ps1 <profile> [--main] [-- <claude args>]"
+if ($PROFILE_NAME -eq "create-profile") {
+  New-InteractiveProfile
   exit 0
 }
 
@@ -156,7 +292,6 @@ else {
   if (-not (Test-Path $claudeJson)) {
     '{"hasCompletedOnboarding":true}' | Set-Content $claudeJson
   }
-  # Seed settings from main config
   $settings = Join-Path $CFG "settings.json"
   if (-not (Test-Path $settings)) {
     if (Test-Path $MAIN_SETTINGS) {
@@ -194,7 +329,6 @@ if ($LASTEXITCODE -eq 0) { $hasSession = $true }
 
 if (-not $hasSession) {
   $cmd = "claude $skip $pluginFlags $CLAUDE_ARGS"
-  # Use Invoke-Expression so the psmux command sees a single string
   $pwdPath = (Get-Location).Path
   & psmux new-session -d -s $sessionName -c $pwdPath $cmd
 }

@@ -7,6 +7,7 @@
 #   claude-api mimo            -> attach/create tmux session for the 'mimo' profile
 #   claude-api mimo --main     -> use ~/.claude config (resume default session with -r)
 #   claude-api mimo -- -p      -> args after `--` are passed straight to `claude`
+#   claude-api create-profile  -> interactively create a new profile
 #
 # Add a model: drop ~/.claude-api/profiles/<name>.env (copy an .example).
 #
@@ -16,6 +17,60 @@ set -euo pipefail
 
 ROOT="$HOME/.claude-api"
 MAIN_SETTINGS="$HOME/.claude/settings.json"
+
+print_banner() {
+  cat <<'BANNER'
+   _____ _                 _         _      _____ _   _ _____
+  /  __ \ |               | |       | |    |_   _| \ | |  __ \
+  | /  \/ | __ _ _ __ ___ | |    ___| |_     | | |  \| | |  \/
+  | |   | |/ _` | '_ ` _ \| |   / _ \ __|    | | | . ` | | __
+  | \__/\ | (_| | | | | | | |__|  __/ |_    _| |_| |\  | |_\ \
+   \____/_|\__,_|_| |_| |_|_____\___|\__|   \___/\_| \__/____/
+
+BANNER
+  echo "  Claude Code, any API. Stay in Claude no matter which model you use."
+  echo
+}
+
+print_help() {
+  print_banner
+  cat <<EOF
+USAGE
+  claude-api <profile> [--main] [-- <claude args>]
+  claude-api create-profile
+  claude-api doctor
+  claude-api --help | -h
+
+COMMANDS
+  <profile>        Launch a profile in an isolated tmux session.
+  create-profile   Interactively create a new ~/.claude-api/profiles/*.env file.
+  doctor           Check that claude and tmux are installed.
+  --help, -h       Show this help message.
+
+FLAGS
+  --main           Use your default ~/.claude config dir instead of an isolated
+                   one. This lets <profile> use the profile's API while letting
+                   <claude args> like -r resume your main subscription sessions.
+  --               Everything after -- is passed straight to claude.
+
+EXAMPLES
+  claude-api deepseek
+  claude-api kimi -- -p "hi"
+  claude-api kimi --main -- -r
+  claude-api create-profile
+
+ENVIRONMENT
+  CLAUDE_API_ASSUME_YES=1  Skip install confirmations for tmux/claude.
+  CLAUDE_API_SAFE=1        Keep normal permission prompts in isolated profiles.
+
+PROFILES
+  Real profiles live in ~/.claude-api/profiles/*.env and are gitignored.
+  Example templates are in ~/.claude-api/profiles/*.env.example.
+
+WINDOWS
+  Use claude-api.ps1 with PowerShell 7+ and psmux.
+EOF
+}
 
 # --- prereq scan + cross-distro install ------------------------------------
 pm_install() { # $* = packages; picks whatever package manager exists
@@ -33,8 +88,27 @@ pm_install() { # $* = packages; picks whatever package manager exists
 
 confirm() { # $1 = prompt; honours CLAUDE_API_ASSUME_YES
   [[ "${CLAUDE_API_ASSUME_YES:-}" == 1 ]] && return 0
-  read -r -p "$1 [Y/n] " a </dev/tty || return 1
+  local a
+  read -r -p "$1 [Y/n] " a || return 1
   [[ -z "$a" || "$a" =~ ^[Yy] ]]
+}
+
+prompt() { # $1 = prompt text, $2 = default value
+  local input
+  if [[ -n "${2:-}" ]]; then
+    read -r -p "$1 [$2]: " input || return 1
+    echo "${input:-$2}"
+  else
+    read -r -p "$1: " input || return 1
+    echo "$input"
+  fi
+}
+
+prompt_secret() { # $1 = prompt text
+  local input
+  read -r -sp "$1: " input || return 1
+  echo >&2
+  echo "$input"
 }
 
 ensure_deps() {
@@ -109,13 +183,111 @@ session_name() {
   printf 'capi-%s%s-%s-%s' "$PROFILE" "$suffix" "$base" "$hash"
 }
 
+create_profile() {
+  print_banner
+  echo "Create a new claude-api profile"
+  echo
+
+  local name provider base_url model auth_token profile_path
+
+  while true; do
+    name=$(prompt "Profile name (e.g. deepseek, kimi, my-mimo)")
+    [[ -n "$name" ]] && break
+    echo "Profile name is required."
+  done
+
+  profile_path="$ROOT/profiles/$name.env"
+  if [[ -f "$profile_path" ]]; then
+    confirm "Profile '$name' already exists. Overwrite?" || { echo "Aborted."; exit 0; }
+  fi
+
+  echo
+  echo "Choose a provider template:"
+  echo "  1) DeepSeek"
+  echo "  2) Moonshot Kimi"
+  echo "  3) Xiaomi MiMo"
+  echo "  4) Local llama.cpp (via proxy)"
+  echo "  5) Custom"
+  local choice
+  choice=$(prompt "Provider" "5")
+
+  case "$choice" in
+    1|deepseek|DeepSeek)
+      base_url="https://api.deepseek.com/anthropic"
+      model="deepseek-v4-pro[1m]"
+      ;;
+    2|kimi|Kimi|moonshot)
+      base_url="https://api.moonshot.ai/anthropic"
+      model="kimi-k2.7-code"
+      ;;
+    3|mimo|MiMo|xiaomi)
+      base_url="https://api.example-mimo.com"
+      model="mimo-v2.5-pro[1m]"
+      ;;
+    4|llama|local)
+      base_url="http://localhost:4000"
+      model="claude-sonnet-4-6"
+      ;;
+    *)
+      base_url=$(prompt "Anthropic-compatible base URL")
+      model=$(prompt "Model name")
+      ;;
+  esac
+
+  if [[ "$choice" == "4" || "$choice" == "llama" || "$choice" == "local" ]]; then
+    auth_token="no-key"
+  else
+    auth_token=$(prompt_secret "API key")
+  fi
+
+  mkdir -p "$ROOT/profiles"
+  cat > "$profile_path" <<EOF
+# claude-api profile: $name
+ANTHROPIC_AUTH_TOKEN=$auth_token
+ANTHROPIC_BASE_URL=$base_url
+ANTHROPIC_MODEL=$model
+ANTHROPIC_DEFAULT_SONNET_MODEL=$model
+ANTHROPIC_DEFAULT_OPUS_MODEL=$model
+ANTHROPIC_DEFAULT_HAIKU_MODEL=$model
+CLAUDE_CODE_SUBAGENT_MODEL=$model
+EOF
+
+  if [[ "$choice" == "4" || "$choice" == "llama" || "$choice" == "local" ]]; then
+    cat >> "$profile_path" <<EOF
+
+# Proxy configuration
+LLAMA_PROXY_PORT=4000
+LLAMA_OPENAI_BASE_URL=http://localhost:8081/v1
+LLAMA_OPENAI_MODEL=Qwen3.5-0.8B-Q5_K_M
+LLAMA_OPENAI_API_KEY=no-key
+EOF
+  fi
+
+  chmod 600 "$profile_path"
+  echo
+  echo "Created profile: $profile_path"
+  echo "Launch it with: claude-api $name"
+}
+
 PROFILE="${1:-}"
+
+if [[ -z "$PROFILE" || "$PROFILE" == "--help" || "$PROFILE" == "-h" ]]; then
+  print_help
+  exit 0
+fi
 
 if [[ "$PROFILE" == "doctor" ]]; then ensure_deps; echo "ok: claude + tmux present."; exit 0; fi
 
+if [[ "$PROFILE" == "create-profile" ]]; then
+  create_profile
+  exit 0
+fi
+
 if [[ -z "$PROFILE" ]]; then
+  print_banner
   echo "profiles:"; ls "$ROOT/profiles"/*.env 2>/dev/null | sed 's#.*/##;s#\.env$#  #' || echo "  (none)"
-  echo "usage: claude-api <profile> [--main] [-- <claude args>]"; exit 0
+  echo "usage: claude-api <profile> [--main] [-- <claude args>]"
+  exit 0
 fi
 
 ENV_FILE="$ROOT/profiles/$PROFILE.env"

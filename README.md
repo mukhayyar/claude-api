@@ -46,6 +46,7 @@ PowerShell 7+ and psmux; it does not auto-install psmux for you.
 ```sh
 claude-api                    # list profiles
 claude-api deepseek           # launch a profile in a tmux session
+claude-api create-profile     # interactively create a new profile
 claude-api kimi -- -p "hi"    # args after -- are passed straight to `claude`
 ```
 
@@ -56,6 +57,7 @@ Detach tmux with `Ctrl-b d`; re-attach by re-running the same command.
 ```powershell
 claude-api.ps1                    # list profiles
 claude-api.ps1 deepseek           # launch a profile in a psmux session
+claude-api.ps1 create-profile     # interactively create a new profile
 claude-api.ps1 kimi -- -p "hi"    # args after -- are passed straight to `claude`
 ```
 
@@ -83,6 +85,17 @@ fill in your key, and drop it as `~/.claude-api/profiles/<name>.env`:
 are tracked.
 
 ## Add a model
+
+### Interactively
+
+```sh
+claude-api create-profile
+```
+
+Answer a few prompts and the launcher writes `~/.claude-api/profiles/<name>.env` for you.
+On Windows use `claude-api.ps1 create-profile`.
+
+### Manually
 
 ```sh
 cp profiles/deepseek.env.example profiles/mymodel.env   # edit URL / key / model
